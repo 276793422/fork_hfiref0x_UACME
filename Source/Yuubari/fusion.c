@@ -1,12 +1,12 @@
 /*******************************************************************************
 *
-*  (C) COPYRIGHT AUTHORS, 2014 - 2019
+*  (C) COPYRIGHT AUTHORS, 2014 - 2021
 *
 *  TITLE:       FUSION.C
 *
-*  VERSION:     1.44
+*  VERSION:     1.52
 *
-*  DATE:        19 Oct 2019
+*  DATE:        23 Nov 2021
 *
 * THIS CODE AND INFORMATION IS PROVIDED "AS IS" WITHOUT WARRANTY OF
 * ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED
@@ -343,9 +343,9 @@ NTSTATUS FusionProbeForRedirectedDlls(
 *
 */
 VOID FusionCheckFile(
-    LPWSTR lpDirectory,
-    WIN32_FIND_DATA *fdata,
-    OUTPUTCALLBACK OutputCallback
+    _In_ LPWSTR lpDirectory,
+    _In_ WIN32_FIND_DATA *fdata,
+    _In_ OUTPUTCALLBACK OutputCallback
 )
 {
     DWORD               lastError;
@@ -637,8 +637,8 @@ VOID FusionCheckFile(
 *
 */
 VOID FusionScanFiles(
-    LPWSTR lpDirectory,
-    OUTPUTCALLBACK OutputCallback
+    _In_ LPWSTR lpDirectory,
+    _In_ OUTPUTCALLBACK OutputCallback
 )
 {
     HANDLE hFile;
@@ -647,12 +647,11 @@ VOID FusionScanFiles(
     WIN32_FIND_DATA fdata;
 
     sz = (_strlen(lpDirectory) + MAX_PATH) * sizeof(WCHAR);
-    lpLookupDirectory = (LPWSTR)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sz);
+    lpLookupDirectory = (LPWSTR)supHeapAlloc(sz);
     if (lpLookupDirectory) {
         _strncpy(lpLookupDirectory, MAX_PATH, lpDirectory, MAX_PATH);
         _strcat(lpLookupDirectory, TEXT("\\*.exe"));
 
-        RtlSecureZeroMemory(&fdata, sizeof(fdata));
         hFile = FindFirstFile(lpLookupDirectory, &fdata);
         if (hFile != INVALID_HANDLE_VALUE) {
             do {
@@ -660,7 +659,7 @@ VOID FusionScanFiles(
             } while (FindNextFile(hFile, &fdata));
             FindClose(hFile);
         }
-        HeapFree(GetProcessHeap(), 0, lpLookupDirectory);
+        supHeapFree(lpLookupDirectory);
     }
 }
 
@@ -673,51 +672,39 @@ VOID FusionScanFiles(
 *
 */
 VOID FusionScanDirectory(
-    LPWSTR lpDirectory,
-    OUTPUTCALLBACK OutputCallback
+    _In_ LPWSTR lpDirectory,
+    _In_ OUTPUTCALLBACK OutputCallback
 )
 {
-    SIZE_T              l;
+    SIZE_T              cchBuffer;
     HANDLE              hDirectory;
-    WCHAR               dirbuf[MAX_PATH * 2];
-    WCHAR               textbuf[MAX_PATH * 2];
+    LPWSTR              lpFilePath;
     WIN32_FIND_DATA     fdata;
-
-    if ((lpDirectory == NULL) || (OutputCallback == NULL))
-        return;
 
     FusionScanFiles(lpDirectory, OutputCallback);
 
-    RtlSecureZeroMemory(dirbuf, sizeof(dirbuf));
-    RtlSecureZeroMemory(textbuf, sizeof(textbuf));
+    cchBuffer = 4 + MAX_PATH + _strlen(lpDirectory);
+    lpFilePath = (LPWSTR)supHeapAlloc(cchBuffer * sizeof(WCHAR));
+    if (lpFilePath) {
 
-    _strncpy(dirbuf, MAX_PATH, lpDirectory, MAX_PATH);
+        _strcpy(lpFilePath, lpDirectory);
+        supConcatenatePaths(lpFilePath, L"*", cchBuffer);
 
-    l = _strlen(dirbuf);
-    if (dirbuf[l - 1] != L'\\') {
-        dirbuf[l] = L'\\';
-        dirbuf[l + 1] = 0;
-        l++;
-    }
+        hDirectory = FindFirstFile(lpFilePath, &fdata);
+        if (hDirectory != INVALID_HANDLE_VALUE) {
+            do {
+                if ((fdata.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                    (fdata.cFileName[0] != L'.')
+                    )
+                {
+                    _strcpy(lpFilePath, lpDirectory);
+                    supConcatenatePaths(lpFilePath, fdata.cFileName, cchBuffer);
+                    FusionScanDirectory(lpFilePath, OutputCallback);
+                }
+            } while (FindNextFile(hDirectory, &fdata));
+            FindClose(hDirectory);
+        }
 
-    _strcpy(textbuf, dirbuf);
-    textbuf[l] = L'*';
-    textbuf[l + 1] = 0;
-    l++;
-
-    RtlSecureZeroMemory(&fdata, sizeof(fdata));
-    hDirectory = FindFirstFile(textbuf, &fdata);
-    if (hDirectory != INVALID_HANDLE_VALUE) {
-        do {
-            if ((fdata.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-                (fdata.cFileName[0] != L'.')
-                )
-            {
-                _strcpy(textbuf, dirbuf);
-                _strcat(textbuf, fdata.cFileName);
-                FusionScanDirectory(textbuf, OutputCallback);
-            }
-        } while (FindNextFile(hDirectory, &fdata));
-        FindClose(hDirectory);
+        supHeapFree(lpFilePath);
     }
 }

@@ -1,12 +1,12 @@
 /*******************************************************************************
 *
-*  (C) COPYRIGHT AUTHORS, 2014 - 2020
+*  (C) COPYRIGHT AUTHORS, 2014 - 2022
 *
 *  TITLE:       APPINFO.C
 *
-*  VERSION:     1.47
+*  VERSION:     1.54
 *
-*  DATE:        22 Mar 2020
+*  DATE:        01 Dec 2022
 *
 * THIS CODE AND INFORMATION IS PROVIDED "AS IS" WITHOUT WARRANTY OF
 * ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED
@@ -15,34 +15,15 @@
 *
 *******************************************************************************/
 #include "global.h"
-#include "patterns.h"
-#include "Shared/hde/hde64.h"
-#pragma comment(lib, "dbghelp.lib")
 #pragma comment(lib, "version.lib")
 
-UAC_AI_GLOBALS g_AiData;
-SYMBOL_ENTRY g_SymbolsHead;
+#define DEFAULT_SYMPATH     L"*https://msdl.microsoft.com/download/symbols"
 
 #define TEXT_SECTION ".text"
 #define TEXT_SECTION_LEGNTH sizeof(TEXT_SECTION)
 
-pfnSymSetOptions        pSymSetOptions;
-pfnSymInitializeW       pSymInitializeW = NULL;
-pfnSymLoadModuleExW     pSymLoadModuleExW = NULL;
-pfnSymEnumSymbolsW      pSymEnumSymbolsW = NULL;
-pfnSymUnloadModule64    pSymUnloadModule64 = NULL;
-pfnSymFromAddrW         pSymFromAddrW = NULL;
-pfnSymCleanup           pSymCleanup = NULL;
-
-UAC_PATTERN g_MmcPatterns[] = {
-    { ptMmcBlock_7600, sizeof(ptMmcBlock_7600), 4, 7600, 7600 },
-    { ptMmcBlock_7601, sizeof(ptMmcBlock_7601), 4, 7601, 7601 },
-    { ptMmcBlock_9200, sizeof(ptMmcBlock_9200), 4, 9200, 9200 },
-    { ptMmcBlock_9600, sizeof(ptMmcBlock_9600), 4, 9600, 9600 },
-    { ptMmcBlock_10240, sizeof(ptMmcBlock_10240), 4, 10240, 10240 },
-    { ptMmcBlock_10586_16299, sizeof(ptMmcBlock_10586_16299), 4, 10586, 16299 },
-    { ptMmcBlock_16300_17134, sizeof(ptMmcBlock_16300_17134), 4, 16300, 17134 }
-};
+#define RDATA_SECTION ".rdata"
+#define RDATA_SECTION_LENGTH sizeof(RDATA_SECTION)
 
 #define TestChar(x)  (((WCHAR)x >= L'A') && ((WCHAR)x <= L'z')) 
 
@@ -56,448 +37,339 @@ UAC_PATTERN g_MmcPatterns[] = {
 */
 BOOL GetAppInfoBuildVersion(
     _In_ LPWSTR lpFileName,
-    _Out_ ULONG *BuildNumber
+    _Out_ ULONG* BuildNumber
 )
 {
     BOOL bResult = FALSE;
     DWORD dwHandle, dwSize;
     PVOID vinfo = NULL;
     UINT Length;
-    VS_FIXEDFILEINFO *pFileInfo;
+    VS_FIXEDFILEINFO* pFileInfo;
 
     *BuildNumber = 0;
 
     dwHandle = 0;
     dwSize = GetFileVersionInfoSize(lpFileName, &dwHandle);
     if (dwSize) {
-        vinfo = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwSize);
+        vinfo = supHeapAlloc(dwSize);
         if (vinfo) {
             if (GetFileVersionInfo(lpFileName, 0, dwSize, vinfo)) {
-                bResult = VerQueryValue(vinfo, TEXT("\\"), (LPVOID *)&pFileInfo, (PUINT)&Length);
+                bResult = VerQueryValue(vinfo, TEXT("\\"), (LPVOID*)&pFileInfo, (PUINT)&Length);
                 if (bResult) {
                     *BuildNumber = HIWORD(pFileInfo->dwFileVersionLS);
                 }
             }
-            HeapFree(GetProcessHeap(), 0, vinfo);
+            supHeapFree(vinfo);
         }
     }
     return bResult;
 }
 
 /*
-* InitDbgHelp
+* LookupAddressBySymbol
 *
 * Purpose:
 *
-* This function loads dbghelp.dll, symsrv.dll from symdll directory and
-* initialize function pointers from dbghelp.dll.
+* Return address of symbol by name.
 *
 */
-BOOL InitDbgHelp(
-    VOID
+ULONG64 LookupAddressBySymbol(
+    _In_ pfnSymFromNameW SymFromName,
+    _In_ LPCWSTR SymbolName,
+    _Out_opt_ PBOOL Status
 )
 {
-    BOOL bResult = FALSE;
-    HMODULE hDbgHelp = NULL;
-    SIZE_T length;
+    BOOL bStatus = FALSE;
+    SIZE_T symSize;
+    ULONG64 symAddress = 0;
+    PSYMBOL_INFOW symbolInfo = NULL;
+
+    symSize = sizeof(SYMBOL_INFOW);
+
+    symbolInfo = (PSYMBOL_INFOW)supHeapAlloc(symSize);
+    if (symbolInfo) {
+
+        symbolInfo->SizeOfStruct = sizeof(SYMBOL_INFOW);
+        symbolInfo->MaxNameLen = 0; //name is not used
+
+        bStatus = SymFromName(
+            GetCurrentProcess(),
+            SymbolName,
+            symbolInfo);
+
+        if (bStatus)
+            symAddress = symbolInfo->Address;
+
+        supHeapFree(symbolInfo);
+    }
+
+    if (Status)
+        *Status = bStatus;
+
+    return symAddress;
+}
+
+/*
+* ResolveAppInfoSymbols
+*
+* Purpose:
+*
+* Load dbghelp, resolve appinfo pointers through symbols lookup.
+*
+*/
+BOOL ResolveAppInfoSymbols(
+    _In_ PUAC_AI_GLOBALS AppInfo
+)
+{
+    SIZE_T dirLength;
     WCHAR szBuffer[MAX_PATH * 2];
+    WCHAR szUserSearchPath[MAX_PATH * 2];
 
-    do {
-        RtlSecureZeroMemory(szBuffer, sizeof(szBuffer));
-        if (GetModuleFileName(NULL, szBuffer, MAX_PATH) == 0)
-            break;
+    HANDLE dllHandle;
+    HANDLE processHandle = GetCurrentProcess();
+    DWORD64 baseOfDll;
 
-        _filepath(szBuffer, szBuffer);
-        _strcat(szBuffer, L"symdll\\");
-        length = _strlen(szBuffer);
-        _strcat(szBuffer, L"dbghelp.dll");
+    pfnSymInitializeW pSymInitialize;
+    pfnSymSetOptions pSymSetOptions;
+    pfnSymLoadModuleExW pSymLoadModuleEx;
+    pfnSymFromNameW pSymFromName;
+    pfnSymUnloadModule64 pSymUnloadModule64;
+    pfnSymCleanup pSymCleanup;
 
-        hDbgHelp = LoadLibrary(szBuffer);
-        if (hDbgHelp == NULL)
-            break;
 
-        szBuffer[length] = 0;
-        _strcat(szBuffer, L"symsrv.dll");
-        if (LoadLibrary(szBuffer)) {
+    RtlSecureZeroMemory(szBuffer, sizeof(szBuffer));
+    if (GetModuleFileName(NULL, szBuffer, MAX_PATH) == 0)
+        return FALSE;
 
-            pSymSetOptions = (pfnSymSetOptions)GetProcAddress(hDbgHelp, "SymSetOptions");
-            if (pSymSetOptions == NULL)
-                break;
+    _filepath(szBuffer, szBuffer);
+    _strcat(szBuffer, TEXT("symdll\\"));
+    dirLength = _strlen(szBuffer);
+    _strcat(szBuffer, TEXT("dbghelp.dll"));
+    dllHandle = LoadLibrary(szBuffer);
+    if (dllHandle == NULL)
+        return FALSE;
 
-            pSymInitializeW = (pfnSymInitializeW)GetProcAddress(hDbgHelp, "SymInitializeW");
-            if (pSymInitializeW == NULL)
-                break;
+    /*szBuffer[dirLength] = 0;
+    _strcat(szBuffer, TEXT("symsrv.dll"));
+    LoadLibrary(szBuffer);*/
 
-            pSymLoadModuleExW = (pfnSymLoadModuleExW)GetProcAddress(hDbgHelp, "SymLoadModuleExW");
-            if (pSymLoadModuleExW == NULL)
-                break;
+    pSymInitialize = (pfnSymInitializeW)GetProcAddress(dllHandle, "SymInitializeW");
+    if (pSymInitialize == NULL)
+        return FALSE;
 
-            pSymEnumSymbolsW = (pfnSymEnumSymbolsW)GetProcAddress(hDbgHelp, "SymEnumSymbolsW");
-            if (pSymEnumSymbolsW == NULL)
-                break;
+    pSymSetOptions = (pfnSymSetOptions)GetProcAddress(dllHandle, "SymSetOptions");
+    if (pSymSetOptions == NULL)
+        return FALSE;
 
-            pSymUnloadModule64 = (pfnSymUnloadModule64)GetProcAddress(hDbgHelp, "SymUnloadModule64");
-            if (pSymUnloadModule64 == NULL)
-                break;
+    pSymLoadModuleEx = (pfnSymLoadModuleExW)GetProcAddress(dllHandle, "SymLoadModuleExW");
+    if (pSymLoadModuleEx == NULL)
+        return FALSE;
 
-            pSymFromAddrW = (pfnSymFromAddrW)GetProcAddress(hDbgHelp, "SymFromAddrW");
-            if (pSymFromAddrW == NULL)
-                break;
+    pSymFromName = (pfnSymFromNameW)GetProcAddress(dllHandle, "SymFromNameW");
+    if (pSymFromName == NULL)
+        return FALSE;
 
-            pSymCleanup = (pfnSymCleanup)GetProcAddress(hDbgHelp, "SymCleanup");
-            if (pSymCleanup == NULL)
-                break;
+    pSymUnloadModule64 = (pfnSymUnloadModule64)GetProcAddress(dllHandle, "SymUnloadModule64");
+    if (pSymUnloadModule64 == NULL)
+        return FALSE;
 
-            bResult = TRUE;
+    pSymCleanup = (pfnSymCleanup)GetProcAddress(dllHandle, "SymCleanup");
+    if (pSymCleanup == NULL)
+        return FALSE;
+
+    pSymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME);
+
+    szBuffer[dirLength] = 0;
+    _strcat(szBuffer, TEXT("Symbols"));
+    if (!CreateDirectory((LPCWSTR)&szBuffer, NULL))
+        if (GetLastError() != ERROR_ALREADY_EXISTS)
+            return FALSE;
+
+    _strcpy(szUserSearchPath, TEXT("SRV*"));
+    _strcat(szUserSearchPath, szBuffer);
+    _strcat(szUserSearchPath, DEFAULT_SYMPATH);
+
+    processHandle = GetCurrentProcess();
+
+    if (pSymInitialize(processHandle, szUserSearchPath, FALSE)) {
+
+        baseOfDll = pSymLoadModuleEx(processHandle,
+            NULL,
+            TEXT("appinfo.dll"),
+            NULL,
+            (DWORD64)AppInfo->DllBase,
+            0,
+            NULL,
+            0);
+
+        if (baseOfDll) {
+            AppInfo->lpAutoApproveEXEList = (PVOID*)LookupAddressBySymbol(pSymFromName, TEXT("g_lpAutoApproveEXEList"), NULL);
+            AppInfo->lpIncludedPFDirs = (PVOID*)LookupAddressBySymbol(pSymFromName, TEXT("g_lpIncludedPFDirs"), NULL);
+            AppInfo->lpIncludedWindowsDirs = (PVOID*)LookupAddressBySymbol(pSymFromName, TEXT("g_lpIncludedWindowsDirs"), NULL);
+            AppInfo->lpIncludedSystemDirs = (PVOID*)LookupAddressBySymbol(pSymFromName, TEXT("g_lpIncludedSystemDirs"), NULL);
+            AppInfo->lpExemptedAutoApproveExes = (PVOID*)LookupAddressBySymbol(pSymFromName, TEXT("g_lpExemptedAutoApproveExes"), NULL);
+            AppInfo->lpExcludedWindowsDirs = (PVOID*)LookupAddressBySymbol(pSymFromName, TEXT("g_lpExcludedWindowsDirs"), NULL);
+            AppInfo->lpAutoApproveEXEList = (PVOID*)LookupAddressBySymbol(pSymFromName, TEXT("g_lpAutoApproveEXEList"), NULL);
+
+            pSymUnloadModule64(processHandle, baseOfDll);
+            pSymCleanup(processHandle);
+
+            return TRUE;
         }
 
-    } while (FALSE);
+    }
 
-    return bResult;
+    return FALSE;
 }
 
-/*
-* SymbolsAddToList
-*
-* Purpose:
-*
-* This function add symbol to the list.
-*
-*/
-VOID SymbolAddToList(
-    _In_ LPWSTR SymbolName,
-    _In_ DWORD64 lpAddress
+PVOID AipFindMSBlockInSection(
+    _In_ PVOID DllBase,
+    _In_ IMAGE_SECTION_HEADER* SectionTableEntry,
+    _In_ ULONG_PTR PatternValue
 )
 {
-    PSYMBOL_ENTRY Entry;
-    SIZE_T        sz;
+    PBYTE SectionBase;
+    ULONG SectionSize, Offset;
 
-    Entry = &g_SymbolsHead;
+    ULONG_PTR TestValue;
+    PVOID RefPointer = NULL, pvMmcBlock = NULL;
 
-    while (Entry->Next != NULL)
-        Entry = Entry->Next;
+    SectionBase = (PBYTE)RtlOffsetToPointer(DllBase, SectionTableEntry->VirtualAddress);
+    SectionSize = SectionTableEntry->Misc.VirtualSize;
 
-    sz = (1 + _strlen(SymbolName)) * sizeof(WCHAR);
+    for (Offset = 0; Offset < SectionSize - sizeof(ULONG_PTR); Offset++) {
 
-    Entry->Next = (PSYMBOL_ENTRY)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(SYMBOL_ENTRY));
-    if (Entry->Next) {
-
-        Entry = Entry->Next;
-        Entry->Next = NULL;
-
-        Entry->Name = (LPWSTR)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sz);
-        if (Entry->Name) {
-
-            _strncpy(Entry->Name, sz / sizeof(WCHAR),
-                SymbolName, sz / sizeof(WCHAR));
-
-            Entry->Address = lpAddress;
-        }
-        else {
-            HeapFree(GetProcessHeap(), 0, Entry);
+        RefPointer = SectionBase + Offset;
+        TestValue = *(PULONG_PTR)RefPointer;
+        if (TestValue == PatternValue) {
+            pvMmcBlock = (PVOID)RefPointer;
+            break;
         }
     }
+
+    return pvMmcBlock;
 }
 
 /*
-* SymbolAddressFromName
+* AipQueryMSBlock
 *
 * Purpose:
 *
-* This function query address from the given symbol name.
+* Locate mmc block.
 *
 */
-DWORD64 SymbolAddressFromName(
-    _In_ LPWSTR lpszName
-)
-{
-    PSYMBOL_ENTRY Entry;
-
-    Entry = g_SymbolsHead.Next;
-
-    while (Entry) {
-        if (!_strcmp(lpszName, Entry->Name))
-            return Entry->Address;
-        Entry = Entry->Next;
-    }
-    return 0;
-}
-
-/*
-* SymEnumSymbolsProc
-*
-* Purpose:
-*
-* Callback of SymEnumSymbolsW.
-*
-*/
-BOOL CALLBACK SymEnumSymbolsProc(
-    _In_ PSYMBOL_INFOW pSymInfo,
-    _In_ ULONG SymbolSize,
-    _In_opt_ PVOID UserContext
-)
-{
-    UNREFERENCED_PARAMETER(SymbolSize);
-    UNREFERENCED_PARAMETER(UserContext);
-
-    SymbolAddToList(pSymInfo->Name, pSymInfo->Address);
-    return TRUE;
-}
-
-/*
-* GetSupportedPattern
-*
-* Purpose:
-*
-* Return pointer to requested pattern if present.
-*
-*/
-_Success_(return == TRUE)
-BOOL GetSupportedPattern(
-    _In_ UAC_PATTERN *Patterns,
-    _Out_ LPCVOID *OutputPattern,
-    _Out_ ULONG *OutputPatternSize,
-    _Out_ ULONG *SubtractBytes
+BOOLEAN AipQueryMSBlock(
+    _In_ UAC_AI_GLOBALS* AppInfo
 )
 {
     ULONG i;
+    ULONG SectionSize;
+    ULONG_PTR PatternValue = 0;
+    PVOID pvMmcBlock = NULL;
+    PBYTE SectionBase;
+    IMAGE_NT_HEADERS* NtHeaders = RtlImageNtHeader(AppInfo->DllBase);
+    IMAGE_SECTION_HEADER* SectionTableEntry, *RDataTableEntry = NULL;
 
-    *OutputPattern = NULL;
-    *OutputPatternSize = 0;
-    *SubtractBytes = 0;
+    WCHAR szSignature[] = L"mmc.exe";
 
-    for (i = 0; i < RTL_NUMBER_OF(g_MmcPatterns); i++) {
-        if ((g_AiData.AppInfoBuildNumber >= Patterns[i].AppInfoBuildMin) &&
-            (g_AiData.AppInfoBuildNumber <= Patterns[i].AppInfoBuildMax))
+    SectionTableEntry = IMAGE_FIRST_SECTION(NtHeaders);
+
+    for (i = 0; i < NtHeaders->FileHeader.NumberOfSections; i++, SectionTableEntry++) {
+
+        SectionBase = (PBYTE)RtlOffsetToPointer(AppInfo->DllBase, SectionTableEntry->VirtualAddress);
+        SectionSize = SectionTableEntry->Misc.VirtualSize;
+
+        PatternValue = (ULONG_PTR)supFindPattern(SectionBase,
+            SectionSize,
+            (CONST PBYTE)szSignature,
+            sizeof(szSignature));
+
+        if (PatternValue)
+            break;
+    }
+
+    if (PatternValue == 0)
+        return FALSE;
+
+    SectionTableEntry = IMAGE_FIRST_SECTION(NtHeaders);
+    for (i = 0; i < NtHeaders->FileHeader.NumberOfSections; i++, SectionTableEntry++) {
+        if (_strncmp_a(
+            (CHAR*)SectionTableEntry->Name,
+            RDATA_SECTION,
+            RDATA_SECTION_LENGTH) == 0)
         {
-            *OutputPattern = Patterns[i].PatternData;
-            *OutputPatternSize = Patterns[i].PatternSize;
-            *SubtractBytes = Patterns[i].SubtractBytes;
-            return TRUE;
+            RDataTableEntry = SectionTableEntry;
+            break;
         }
     }
-    return FALSE;
-}
 
-/*
-* QueryAiMmcBlock
-*
-* Purpose:
-*
-* Locate mmc block. No corresponding symbol, code very vary from compiler version.
-*
-*/
-BOOLEAN QueryAiMmcBlock(
-    _In_ PBYTE DllBase,
-    _In_ SIZE_T DllVirtualSize
-    )
-{
-    ULONG       PatternSize = 0, SubtractBytes = 0, instOffset, tempOffset;
-    LONG        rel = 0;
-    PVOID       Pattern = NULL, PatternData = NULL, TestPtr = NULL;
+    if (RDataTableEntry) {
 
-    hde64s      hs;
-    ULONG       sectionSize = 0;
-    PBYTE       ptrCode;
-    SIZE_T      matchBytes, reqMatchSize;
+        pvMmcBlock = AipFindMSBlockInSection(AppInfo->DllBase,
+            RDataTableEntry,
+            PatternValue);
 
-    if (DllBase == NULL)
-        return FALSE;
-
-    g_AiData.MmcBlock = NULL;
-
-    //
-    // Locate .text image section.
-    //
-    ptrCode = (PBYTE)supLookupImageSectionByName(TEXT_SECTION,
-        TEXT_SECTION_LEGNTH,
-        (PVOID)DllBase,
-        &sectionSize);
-
-    if ((ptrCode == NULL) || (sectionSize < 1024))
-        return FALSE;
-
-    if (g_NtBuildNumber < 17763) {
-        if (GetSupportedPattern(g_MmcPatterns, &PatternData, &PatternSize, &SubtractBytes)) {
-            if (PatternData) {
-                Pattern = (PVOID)supFindPattern(ptrCode, sectionSize, (PBYTE)PatternData, PatternSize);
-                if (Pattern != NULL) {
-                    rel = *(DWORD*)((ULONG_PTR)Pattern - SubtractBytes);
-                    TestPtr = (UAC_MMC_BLOCK*)((ULONG_PTR)Pattern + rel);
-                    if (IN_REGION(TestPtr, DllBase, DllVirtualSize)) {
-                        g_AiData.MmcBlock = (UAC_MMC_BLOCK*)TestPtr;
-                        return TRUE;
-                    }
-                }
-            }
-        }
     }
     else {
 
-        instOffset = 0;
+        SectionTableEntry = IMAGE_FIRST_SECTION(NtHeaders);
+        for (i = 0; i < NtHeaders->FileHeader.NumberOfSections; i++, SectionTableEntry++) {
 
-        do {
+            pvMmcBlock = AipFindMSBlockInSection(AppInfo->DllBase,
+                SectionTableEntry,
+                PatternValue);
 
-            hde64_disasm((void*)(ptrCode + instOffset), &hs);
-            if (hs.flags & F_ERROR)
+            if (pvMmcBlock)
                 break;
-
-            if (hs.len == 3) {
-
-                hde64_disasm((void*)(ptrCode + instOffset), &hs);
-                if (hs.flags & F_ERROR)
-                    break;
-
-                //
-                // xor     r15d, r15d
-                //
-
-                reqMatchSize = sizeof(ptMmcBlock_Start);
-
-                matchBytes = RtlCompareMemory(RtlOffsetToPointer(ptrCode, instOffset),
-                    ptMmcBlock_Start,
-                    reqMatchSize);
-
-                if (matchBytes == reqMatchSize) {
-
-                    //
-                    // Next instruction check.
-                    //
-                    tempOffset = (instOffset += hs.len);
-
-                    hde64_disasm((void*)(ptrCode + tempOffset), &hs);
-                    if (hs.flags & F_ERROR)
-                        break;
-
-                    if (hs.len == 7) {
-
-                        if ((ptrCode[tempOffset + 1] == 0x8D) &&
-                            (ptrCode[tempOffset + 2] == 0x35))
-                        {
-
-                            //
-                            // Next instruction check.
-                            //
-
-                            hde64_disasm((void*)(ptrCode + tempOffset + hs.len), &hs);
-                            if (hs.flags & F_ERROR)
-                                break;
-
-                            if (hs.len == 3) {
-
-                                rel = *(PLONG)(ptrCode + tempOffset + 3);
-                                TestPtr = (UAC_MMC_BLOCK*)((ULONG_PTR)ptrCode + tempOffset + 7 + rel);
-                                if (IN_REGION(TestPtr, DllBase, DllVirtualSize)) {
-                                    g_AiData.MmcBlock = (UAC_MMC_BLOCK*)TestPtr;
-                                    return TRUE;
-                                }
-
-                            }
-
-                        }
-                    }
-                }
-            }
-
-            instOffset += hs.len;
-
-        } while (instOffset < (sectionSize - 16));
-
-
-    }
-    return FALSE;
-}
-
-/*
-* QueryAiGlobalData
-*
-* Purpose:
-*
-* Load symbols for Appinfo global variables.
-*
-*/
-VOID QueryAiGlobalData(
-    VOID
-)
-{
-    HANDLE  hSym = GetCurrentProcess();
-    WCHAR   szFullSymbolInfo[MAX_PATH * 2];
-    WCHAR   szSymbolName[MAX_PATH];
-
-    if (g_AiData.DllBase == NULL)
-        return;
-
-    do {
-        pSymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME);
-        RtlSecureZeroMemory(&g_SymbolsHead, sizeof(g_SymbolsHead));
-
-        RtlSecureZeroMemory(szSymbolName, sizeof(szSymbolName));
-        if (GetModuleFileName(NULL, szSymbolName, MAX_PATH) == 0)
-            break;
-
-        _strcpy(szFullSymbolInfo, TEXT("SRV*"));
-        _filepath(szSymbolName, _strend_w(szFullSymbolInfo));
-        _strcat(szFullSymbolInfo, TEXT("Symbols"));
-        if (!CreateDirectory(&szFullSymbolInfo[4], NULL))
-            if (GetLastError() != ERROR_ALREADY_EXISTS)
-                break;
-
-        _strcat(szFullSymbolInfo, TEXT("*https://msdl.microsoft.com/download/symbols"));
-        if (pSymInitializeW(hSym, szFullSymbolInfo, FALSE)) {
-            if (pSymLoadModuleExW(hSym, NULL, TEXT("appinfo.dll"), NULL, (DWORD64)g_AiData.DllBase, 0, NULL, 0)) {
-                if (pSymEnumSymbolsW(hSym, (DWORD64)g_AiData.DllBase, NULL, SymEnumSymbolsProc, NULL)) {
-                    g_AiData.lpAutoApproveEXEList = (PVOID*)SymbolAddressFromName(TEXT("g_lpAutoApproveEXEList"));
-                    g_AiData.lpIncludedPFDirs = (PVOID*)SymbolAddressFromName(TEXT("g_lpIncludedPFDirs"));
-                    g_AiData.lpIncludedWindowsDirs = (PVOID*)SymbolAddressFromName(TEXT("g_lpIncludedWindowsDirs"));
-                    g_AiData.lpIncludedSystemDirs = (PVOID*)SymbolAddressFromName(TEXT("g_lpIncludedSystemDirs"));
-                    g_AiData.lpExemptedAutoApproveExes = (PVOID*)SymbolAddressFromName(TEXT("g_lpExemptedAutoApproveExes"));
-                    g_AiData.lpExcludedWindowsDirs = (PVOID*)SymbolAddressFromName(TEXT("g_lpExcludedWindowsDirs"));
-                }
-                pSymUnloadModule64(hSym, (DWORD64)g_AiData.DllBase);
-            }
-            pSymCleanup(hSym);
         }
-    } while (FALSE);
+    }
 
-}
-
-BOOL IsCrossPtr(
-    ULONG_PTR Ptr,
-    ULONG_PTR CurrentList
-)
-{
-    if (Ptr == 0) {
+    if (pvMmcBlock) {
+        AppInfo->MmcBlock = pvMmcBlock;
         return TRUE;
     }
 
-    if (g_AiData.lpAutoApproveEXEList) {
-        if (CurrentList != (ULONG_PTR)g_AiData.lpAutoApproveEXEList)
-            if ((ULONG_PTR)Ptr == (ULONG_PTR)g_AiData.lpAutoApproveEXEList[0])
+    return FALSE;
+}
+
+BOOL IsCrossPtr(
+    _In_ UAC_AI_GLOBALS* AppInfo,
+    _In_ ULONG_PTR Ptr,
+    _In_ ULONG_PTR CurrentList
+)
+{
+    if (Ptr == 0 || AppInfo == NULL) {
+        return TRUE;
+    }
+
+    if (AppInfo->lpAutoApproveEXEList) {
+        if (CurrentList != (ULONG_PTR)AppInfo->lpAutoApproveEXEList)
+            if ((ULONG_PTR)Ptr == (ULONG_PTR)AppInfo->lpAutoApproveEXEList[0])
                 return TRUE;
     }
-    if (g_AiData.lpExcludedWindowsDirs) {
-        if (CurrentList != (ULONG_PTR)g_AiData.lpExcludedWindowsDirs)
-            if ((ULONG_PTR)Ptr == (ULONG_PTR)g_AiData.lpExcludedWindowsDirs[0])
+    if (AppInfo->lpExcludedWindowsDirs) {
+        if (CurrentList != (ULONG_PTR)AppInfo->lpExcludedWindowsDirs)
+            if ((ULONG_PTR)Ptr == (ULONG_PTR)AppInfo->lpExcludedWindowsDirs[0])
                 return TRUE;
     }
-    if (g_AiData.lpExemptedAutoApproveExes) {
-        if (CurrentList != (ULONG_PTR)g_AiData.lpExemptedAutoApproveExes)
-            if ((ULONG_PTR)Ptr == (ULONG_PTR)g_AiData.lpExemptedAutoApproveExes[0])
+    if (AppInfo->lpExemptedAutoApproveExes) {
+        if (CurrentList != (ULONG_PTR)AppInfo->lpExemptedAutoApproveExes)
+            if ((ULONG_PTR)Ptr == (ULONG_PTR)AppInfo->lpExemptedAutoApproveExes[0])
                 return TRUE;
     }
-    if (g_AiData.lpIncludedPFDirs) {
-        if (CurrentList != (ULONG_PTR)g_AiData.lpIncludedPFDirs)
-            if ((ULONG_PTR)Ptr == (ULONG_PTR)g_AiData.lpIncludedPFDirs[0])
+    if (AppInfo->lpIncludedPFDirs) {
+        if (CurrentList != (ULONG_PTR)AppInfo->lpIncludedPFDirs)
+            if ((ULONG_PTR)Ptr == (ULONG_PTR)AppInfo->lpIncludedPFDirs[0])
                 return TRUE;
     }
-    if (g_AiData.lpIncludedSystemDirs) {
-        if (CurrentList != (ULONG_PTR)g_AiData.lpIncludedSystemDirs)
-            if ((ULONG_PTR)Ptr == (ULONG_PTR)g_AiData.lpIncludedSystemDirs[0])
+    if (AppInfo->lpIncludedSystemDirs) {
+        if (CurrentList != (ULONG_PTR)AppInfo->lpIncludedSystemDirs)
+            if ((ULONG_PTR)Ptr == (ULONG_PTR)AppInfo->lpIncludedSystemDirs[0])
                 return TRUE;
     }
-    if (g_AiData.lpIncludedWindowsDirs) {
-        if (CurrentList != (ULONG_PTR)g_AiData.lpIncludedWindowsDirs)
-            if ((ULONG_PTR)Ptr == (ULONG_PTR)g_AiData.lpIncludedWindowsDirs[0])
+    if (AppInfo->lpIncludedWindowsDirs) {
+        if (CurrentList != (ULONG_PTR)AppInfo->lpIncludedWindowsDirs)
+            if ((ULONG_PTR)Ptr == (ULONG_PTR)AppInfo->lpIncludedWindowsDirs[0])
                 return TRUE;
     }
     return FALSE;
@@ -512,37 +384,39 @@ BOOL IsCrossPtr(
 *
 */
 VOID ListMMCFiles(
-    OUTPUTCALLBACK OutputCallback
+    _In_ UAC_AI_GLOBALS* AppInfo,
+    _In_ OUTPUTCALLBACK OutputCallback
 )
 {
     SIZE_T          i, Length;
     LPWSTR          TestString = NULL;
-    PVOID          *MscArray = NULL;
+    PVOID* MscArray = NULL;
     UAC_AI_DATA     CallbackData;
 
-    if (!QueryAiMmcBlock((PBYTE)g_AiData.DllBase, g_AiData.DllVirtualSize))
+    if (!AipQueryMSBlock(AppInfo))
         return;
 
     __try {
-        if (g_AiData.MmcBlock->ControlFilesCount > 256) {
+        if (AppInfo->MmcBlock->NumOfElements == 0 ||
+            AppInfo->MmcBlock->NumOfElements > 256) {
             OutputDebugString(TEXT("Invalid block data"));
         }
         else {
             CallbackData.Type = AiManagementConsole;
-            TestString = g_AiData.MmcBlock->lpManagementApplication;
+            TestString = AppInfo->MmcBlock->lpManagementApplication;
             if (TestString) {
-                if (IN_REGION(TestString, g_AiData.DllBase, g_AiData.DllVirtualSize)) {
+                if (IN_REGION(TestString, AppInfo->DllBase, AppInfo->DllVirtualSize)) {
                     CallbackData.Name = TestString;
                     CallbackData.Length = _strlen(TestString);
                     OutputCallback((PVOID)&CallbackData);
                 }
             }
             CallbackData.Type = AiSnapinFile;
-            MscArray = (PVOID*)g_AiData.MmcBlock->ControlFiles;
-            for (i = 0; i < g_AiData.MmcBlock->ControlFilesCount; i++) {
+            MscArray = (PVOID*)AppInfo->MmcBlock->Base;
+            for (i = 0; i < AppInfo->MmcBlock->NumOfElements; i++) {
                 TestString = (LPWSTR)MscArray[i];
                 if (TestString != NULL) {
-                    if (IN_REGION(TestString, g_AiData.DllBase, g_AiData.DllVirtualSize)) {
+                    if (IN_REGION(TestString, AppInfo->DllBase, AppInfo->DllVirtualSize)) {
                         Length = _strlen(TestString);
                         CallbackData.Name = TestString;
                         CallbackData.Length = Length;
@@ -567,7 +441,8 @@ VOID ListMMCFiles(
 *
 */
 VOID ListAutoApproveEXE(
-    OUTPUTCALLBACK OutputCallback
+    _In_ UAC_AI_GLOBALS* AppInfo,
+    _In_ OUTPUTCALLBACK OutputCallback
 )
 {
     WCHAR           k, lk;
@@ -575,7 +450,7 @@ VOID ListAutoApproveEXE(
     LPWSTR          TestString = NULL;
     UAC_AI_DATA     CallbackData;
 
-    if (g_AiData.lpAutoApproveEXEList == NULL)
+    if (AppInfo->lpAutoApproveEXEList == NULL)
         return;
 
     CallbackData.Type = AiAutoApproveEXE;
@@ -585,8 +460,8 @@ VOID ListAutoApproveEXE(
     lk = 0;
     __try {
         do {
-            TestString = (LPWSTR)g_AiData.lpAutoApproveEXEList[i];
-            if (IsCrossPtr((ULONG_PTR)TestString, (ULONG_PTR)g_AiData.lpAutoApproveEXEList))
+            TestString = (LPWSTR)AppInfo->lpAutoApproveEXEList[i];
+            if (IsCrossPtr(AppInfo, (ULONG_PTR)TestString, (ULONG_PTR)AppInfo->lpAutoApproveEXEList))
                 break;
 
             k = TestString[0];
@@ -621,8 +496,9 @@ VOID ListAutoApproveEXE(
 *
 */
 VOID ListStringDataUnsorted(
+    UAC_AI_GLOBALS* AppInfo,
     AI_DATA_TYPE AiDataType,
-    PVOID *Data,
+    PVOID* Data,
     OUTPUTCALLBACK OutputCallback
 )
 {
@@ -640,7 +516,7 @@ VOID ListStringDataUnsorted(
     __try {
         do {
             TestString = (LPWSTR)Data[i];
-            if (IsCrossPtr((ULONG_PTR)TestString, (ULONG_PTR)Data))
+            if (IsCrossPtr(AppInfo, (ULONG_PTR)TestString, (ULONG_PTR)Data))
                 break;
 
             if (!TestChar(TestString[0]))
@@ -682,55 +558,85 @@ VOID ScanAppInfo(
     OBJECT_ATTRIBUTES   attr;
     UNICODE_STRING      usFileName;
     IO_STATUS_BLOCK     iosb;
+    UAC_AI_GLOBALS      AppInfo;
 
-
-    RtlSecureZeroMemory(&usFileName, sizeof(usFileName));
-    RtlSecureZeroMemory(&g_AiData, sizeof(g_AiData));
+    RtlSecureZeroMemory(&AppInfo, sizeof(AppInfo));
+    RtlInitEmptyUnicodeString(&usFileName, NULL, 0);
 
     do {
 
-        if (!GetAppInfoBuildVersion(lpFileName, &g_AiData.AppInfoBuildNumber))
-            break;
+        //
+        // Due to brilliant MS design all newest versions has the same build in file version attributes.
+        //
+        if (g_NtBuildNumber >= NT_WIN10_19H1) {
+            AppInfo.AppInfoBuildNumber = g_NtBuildNumber;
+        }
+        else {
+            if (!GetAppInfoBuildVersion(lpFileName, &AppInfo.AppInfoBuildNumber))
+                break;
+        }
 
         if (RtlDosPathNameToNtPathName_U(lpFileName, &usFileName, NULL, NULL) == FALSE)
             break;
 
-        InitializeObjectAttributes(&attr, &usFileName,
-            OBJ_CASE_INSENSITIVE, NULL, NULL);
+        InitializeObjectAttributes(&attr, &usFileName, OBJ_CASE_INSENSITIVE, NULL, NULL);
         RtlSecureZeroMemory(&iosb, sizeof(iosb));
 
-        status = NtCreateFile(&hFile, SYNCHRONIZE | FILE_READ_DATA,
-            &attr, &iosb, NULL, 0, FILE_SHARE_READ, FILE_OPEN,
-            FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+        status = NtCreateFile(&hFile,
+            SYNCHRONIZE | FILE_READ_DATA,
+            &attr,
+            &iosb,
+            NULL,
+            0,
+            FILE_SHARE_READ,
+            FILE_OPEN,
+            FILE_SYNCHRONOUS_IO_NONALERT,
+            NULL,
+            0);
 
         if (!NT_SUCCESS(status))
             break;
 
-        status = NtCreateSection(&hSection, SECTION_ALL_ACCESS, NULL,
-            NULL, PAGE_READONLY, SEC_IMAGE, hFile);
+        status = NtCreateSection(&hSection,
+            SECTION_ALL_ACCESS,
+            NULL,
+            NULL,
+            PAGE_READONLY,
+            SEC_IMAGE,
+            hFile);
+
         if (!NT_SUCCESS(status))
             break;
 
         DllBase = NULL;
         DllVirtualSize = 0;
-        status = NtMapViewOfSection(hSection, NtCurrentProcess(), (PVOID*)&DllBase,
-            0, 0, NULL, &DllVirtualSize, ViewUnmap, 0, PAGE_READONLY);
+
+        status = NtMapViewOfSection(hSection,
+            NtCurrentProcess(),
+            (PVOID*)&DllBase,
+            0,
+            0,
+            NULL,
+            &DllVirtualSize,
+            ViewUnmap,
+            0,
+            PAGE_READONLY);
+
         if (!NT_SUCCESS(status))
             break;
 
-        g_AiData.DllBase = DllBase;
-        g_AiData.DllVirtualSize = DllVirtualSize;
+        AppInfo.DllBase = DllBase;
+        AppInfo.DllVirtualSize = DllVirtualSize;
 
-        ListMMCFiles(OutputCallback);
+        ListMMCFiles(&AppInfo, OutputCallback);
 
-        if (InitDbgHelp()) {
-            QueryAiGlobalData();
-            ListAutoApproveEXE(OutputCallback);
-            ListStringDataUnsorted(AiIncludedPFDirs, g_AiData.lpIncludedPFDirs, OutputCallback);
-            ListStringDataUnsorted(AilpIncludedWindowsDirs, g_AiData.lpIncludedWindowsDirs, OutputCallback);
-            ListStringDataUnsorted(AiIncludedSystemDirs, g_AiData.lpIncludedSystemDirs, OutputCallback);
-            ListStringDataUnsorted(AiExemptedAutoApproveExes, g_AiData.lpExemptedAutoApproveExes, OutputCallback);
-            ListStringDataUnsorted(AiExcludedWindowsDirs, g_AiData.lpExcludedWindowsDirs, OutputCallback);
+        if (ResolveAppInfoSymbols(&AppInfo)) {
+            ListAutoApproveEXE(&AppInfo, OutputCallback);
+            ListStringDataUnsorted(&AppInfo, AiIncludedPFDirs, AppInfo.lpIncludedPFDirs, OutputCallback);
+            ListStringDataUnsorted(&AppInfo, AilpIncludedWindowsDirs, AppInfo.lpIncludedWindowsDirs, OutputCallback);
+            ListStringDataUnsorted(&AppInfo, AiIncludedSystemDirs, AppInfo.lpIncludedSystemDirs, OutputCallback);
+            ListStringDataUnsorted(&AppInfo, AiExemptedAutoApproveExes, AppInfo.lpExemptedAutoApproveExes, OutputCallback);
+            ListStringDataUnsorted(&AppInfo, AiExcludedWindowsDirs, AppInfo.lpExcludedWindowsDirs, OutputCallback);
         }
 
     } while (FALSE);

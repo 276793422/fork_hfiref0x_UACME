@@ -1,12 +1,12 @@
 #/*******************************************************************************
 *
-*  (C) COPYRIGHT AUTHORS, 2014 - 2019
+*  (C) COPYRIGHT AUTHORS, 2014 - 2022
 *
 *  TITLE:       APPINFO.H
 *
-*  VERSION:     1.40
+*  VERSION:     1.54
 *
-*  DATE:        19 Mar 2019
+*  DATE:        01 Dec 2022
 *
 *  Header file for the AppInfo scan.
 *
@@ -18,12 +18,6 @@
 *******************************************************************************/
 #pragma once
 #include <DbgHelp.h>
-
-typedef struct _SYMBOL_ENTRY {
-    struct _SYMBOL_ENTRY *Next;
-    LPWSTR   Name;
-    DWORD64  Address;
-} SYMBOL_ENTRY, *PSYMBOL_ENTRY;
 
 typedef enum _AI_DATA_TYPE {
     AiSnapinFile = 1,
@@ -45,18 +39,10 @@ typedef struct _UAC_AI_DATA {
 
 typedef struct _UAC_MMC_BLOCK {
     LPWSTR lpManagementApplication;
-    PVOID ControlFiles;
-    ULONG ControlFilesCount;
+    PVOID Base;
+    ULONG NumOfElements;
     ULONG Reserved;
 } UAC_MMC_BLOCK, *PUAC_MMC_BLOCK;
-
-typedef struct _UAC_PATTERN {
-    LPCVOID PatternData;
-    ULONG PatternSize;
-    ULONG SubtractBytes;
-    ULONG AppInfoBuildMin;
-    ULONG AppInfoBuildMax;
-} UAC_PATTERN, *PUAC_PATTERN;
 
 typedef struct _UAC_AI_GLOBALS {
     ULONG AppInfoBuildNumber;
@@ -72,14 +58,17 @@ typedef struct _UAC_AI_GLOBALS {
 } UAC_AI_GLOBALS, *PUAC_AI_GLOBALS;
 
 typedef  DWORD(WINAPI *pfnSymSetOptions)(
-    _In_ DWORD   SymOptions
-    );
+    _In_ DWORD   SymOptions);
 
 typedef BOOL(WINAPI *pfnSymInitializeW)(
     _In_ HANDLE hProcess,
     _In_opt_ PCWSTR UserSearchPath,
-    _In_ BOOL fInvadeProcess
-    );
+    _In_ BOOL fInvadeProcess);
+
+typedef BOOL(WINAPI* pfnSymFromNameW)(
+    _In_ HANDLE hProcess,
+    _In_ PCWSTR Name,
+    _Inout_ PSYMBOL_INFOW Symbol);
 
 typedef DWORD64(WINAPI *pfnSymLoadModuleExW)(
     _In_ HANDLE hProcess,
@@ -89,32 +78,14 @@ typedef DWORD64(WINAPI *pfnSymLoadModuleExW)(
     _In_ DWORD64 BaseOfDll,
     _In_ DWORD DllSize,
     _In_opt_ PMODLOAD_DATA Data,
-    _In_opt_ DWORD Flags
-    );
-
-typedef BOOL(WINAPI *pfnSymEnumSymbolsW)(
-    _In_ HANDLE hProcess,
-    _In_ ULONG64 BaseOfDll,
-    _In_opt_ PCWSTR Mask,
-    _In_ PSYM_ENUMERATESYMBOLS_CALLBACKW EnumSymbolsCallback,
-    _In_opt_ PVOID UserContext
-    );
+    _In_ DWORD Flags);
 
 typedef BOOL(WINAPI *pfnSymUnloadModule64)(
     _In_ HANDLE hProcess,
-    _In_ DWORD64 BaseOfDll
-    );
+    _In_ DWORD64 BaseOfDll);
 
 typedef BOOL(WINAPI *pfnSymCleanup)(
-    _In_ HANDLE hProcess
-    );
-
-typedef BOOL(WINAPI *pfnSymFromAddrW)(
-    _In_ HANDLE hProcess,
-    _In_ DWORD64 Address,
-    _Out_opt_ PDWORD64 Displacement,
-    _Inout_ PSYMBOL_INFOW Symbol
-    );
+    _In_ HANDLE hProcess);
 
 VOID ScanAppInfo(
     LPWSTR lpFileName,

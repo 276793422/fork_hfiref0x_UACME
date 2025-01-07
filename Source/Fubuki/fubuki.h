@@ -1,12 +1,12 @@
 /*******************************************************************************
 *
-*  (C) COPYRIGHT AUTHORS, 2018 - 2019
+*  (C) COPYRIGHT AUTHORS, 2018 - 2023
 *
 *  TITLE:       FUBUKI.H
 *
-*  VERSION:     3.15
+*  VERSION:     3.64
 *
-*  DATE:        15 Feb 2019
+*  DATE:        04 Feb 2023
 *
 *  Fubuki global include header file.
 *
@@ -27,13 +27,13 @@
 #include "shared\cmdline.h"
 
 #include "uihacks.h"
+#include "pca.h"
 
 //
 // Forwards
 //
-#include "unbcl.h"
-#include "wbemcomn.h"
 #include "winmm.h"
+#include "atldll.h"
 
 #define LoadedMsg      TEXT("Fubuki lock and loaded")
 
@@ -42,3 +42,5 @@
 
 //suppress all additional output
 #define AKAGI_FLAG_TANGO 2
+
+extern UACME_PARAM_BLOCK g_SharedParams;

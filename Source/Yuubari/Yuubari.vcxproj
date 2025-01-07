@@ -24,20 +24,22 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v142</PlatformToolset>
+    <PlatformToolset>v143</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
+    <SpectreMitigation>false</SpectreMitigation>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v142</PlatformToolset>
+    <PlatformToolset>v143</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
+    <SpectreMitigation>false</SpectreMitigation>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseInternal|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v142</PlatformToolset>
+    <PlatformToolset>v143</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
     <SpectreMitigation>false</SpectreMitigation>
@@ -123,6 +125,7 @@
       <EntryPointSymbol>main</EntryPointSymbol>
       <SetChecksum>true</SetChecksum>
       <MinimumRequiredVersion>6.0</MinimumRequiredVersion>
+      <AdditionalOptions>/NOCOFFGRPINFO %(AdditionalOptions)</AdditionalOptions>
     </Link>
     <PostBuildEvent>
       <Command>
@@ -156,6 +159,7 @@
       <EntryPointSymbol>main</EntryPointSymbol>
       <SetChecksum>true</SetChecksum>
       <MinimumRequiredVersion>6.0</MinimumRequiredVersion>
+      <AdditionalOptions>/NOCOFFGRPINFO %(AdditionalOptions)</AdditionalOptions>
     </Link>
     <PostBuildEvent>
       <Command>\Utils\StripDebug.exe .\output\$(Platform)\$(Configuration)\UacInfo64.exe</Command>
@@ -191,8 +195,6 @@
     <ClInclude Include="..\Shared\hde\pstdint.h" />
     <ClInclude Include="..\Shared\hde\table64.h" />
     <ClInclude Include="..\Shared\minirtl.h" />
-    <ClInclude Include="..\Shared\ntos.h" />
-    <ClInclude Include="..\Shared\ntsxs.h" />
     <ClInclude Include="..\Shared\rtltypes.h" />
     <ClInclude Include="..\Shared\_filename.h" />
     <ClInclude Include="appinfo.h" />
@@ -203,7 +205,6 @@
     <ClInclude Include="fusion.h" />
     <ClInclude Include="global.h" />
     <ClInclude Include="logger.h" />
-    <ClInclude Include="patterns.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="sup.h" />
     <ClInclude Include="tests\test_fusion.h" />

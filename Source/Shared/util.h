@@ -1,12 +1,12 @@
 /*******************************************************************************
 *
-*  (C) COPYRIGHT AUTHORS, 2017 - 2019
+*  (C) COPYRIGHT AUTHORS, 2017 - 2024
 *
 *  TITLE:       UTIL.H
 *
-*  VERSION:     3.17
+*  VERSION:     3.66
 *
-*  DATE:        19 Mar 2019
+*  DATE:        03 Apr 2024
 *
 *  Global support routines header file shared between payload dlls.
 *
@@ -40,19 +40,31 @@ typedef BOOL(WINAPI* PFNCREATEPROCESSW)(
     LPSTARTUPINFOW lpStartupInfo,
     LPPROCESS_INFORMATION lpProcessInformation);
 
+typedef BOOL(WINAPI *PFNCREATEPROCESSASUSERW)(
+    _In_opt_ HANDLE hToken,
+    _In_opt_ LPCWSTR lpApplicationName,
+    _Inout_opt_ LPWSTR lpCommandLine,
+    _In_opt_ LPSECURITY_ATTRIBUTES lpProcessAttributes,
+    _In_opt_ LPSECURITY_ATTRIBUTES lpThreadAttributes,
+    _In_ BOOL bInheritHandles,
+    _In_ DWORD dwCreationFlags,
+    _In_opt_ LPVOID lpEnvironment,
+    _In_opt_ LPCWSTR lpCurrentDirectory,
+    _In_ LPSTARTUPINFOW lpStartupInfo,
+    _Out_ LPPROCESS_INFORMATION lpProcessInformation);
+
 typedef struct _OBJSCANPARAM {
     PWSTR Buffer;
     SIZE_T BufferSize;
 } OBJSCANPARAM, *POBJSCANPARAM;
 
-typedef struct _SXS_SEARCH_CONTEXT {
-    LPWSTR DllName;
-    LPWSTR SxsKey;
-    LPWSTR FullDllPath;
-} SXS_SEARCH_CONTEXT, *PSXS_SEARCH_CONTEXT;
+VOID ucmBinTextEncode(
+    _In_ unsigned __int64 x,
+    _Inout_ wchar_t* s);
 
-VOID ucmPingBack(
-    VOID);
+VOID ucmGenerateSharedObjectName(
+    _In_ WORD ObjectId,
+    _Inout_ LPWSTR lpBuffer);
 
 BOOLEAN ucmPrivilegeEnabled(
     _In_ HANDLE hToken,
@@ -61,9 +73,15 @@ BOOLEAN ucmPrivilegeEnabled(
 NTSTATUS ucmCreateSyncMutant(
     _Out_ PHANDLE phMutant);
 
-LPVOID ucmLdrGetProcAddress(
-    _In_ PCHAR ImageBase,
-    _In_ PCHAR RoutineName);
+BOOLEAN ucmIsProcess32bit(
+    _In_ HANDLE hProcess);
+
+DWORD ucmGetHashForString(
+    _In_ char* s);
+
+LPVOID ucmGetProcedureAddressByHash(
+    _In_ PVOID ImageBase,
+    _In_ DWORD ProcedureHash);
 
 VOID ucmGetStartupInfo(
     _In_ LPSTARTUPINFOW lpStartupInfo);
@@ -74,7 +92,7 @@ DWORD ucmExpandEnvironmentStrings(
     _In_ DWORD nSize);
 
 PVOID ucmGetSystemInfo(
-    _In_ SYSTEM_INFORMATION_CLASS InfoClass);
+    _In_ SYSTEM_INFORMATION_CLASS SystemInformationClass);
 
 BOOL ucmLaunchPayload(
     _In_opt_ LPWSTR pszPayload,
@@ -86,6 +104,7 @@ BOOL ucmLaunchPayloadEx(
     _In_opt_ DWORD cbPayload);
 
 BOOL ucmLaunchPayload2(
+    _In_ PFNCREATEPROCESSASUSERW pCreateProcessAsUser,
     _In_ BOOL bIsLocalSystem,
     _In_ ULONG SessionId,
     _In_opt_ LPWSTR pszPayload,
@@ -107,13 +126,6 @@ NTSTATUS ucmIsUserHasInteractiveSid(
 NTSTATUS ucmIsLocalSystem(
     _Out_ PBOOL pbResult);
 
-wchar_t *sxsFilePathNoSlash(
-    _In_ const wchar_t *fname,
-    _In_ wchar_t *fpath);
-
-BOOL sxsFindLoaderEntry(
-    _In_ PSXS_SEARCH_CONTEXT Context);
-
 HANDLE ucmOpenAkagiNamespace(
     VOID);
 
@@ -132,8 +144,19 @@ NTSTATUS ucmIsProcessElevated(
     _In_ ULONG ProcessId,
     _Out_ PBOOL Elevated);
 
+PLARGE_INTEGER ucmFormatTimeOut(
+    _Out_ PLARGE_INTEGER TimeOut,
+    _In_ DWORD Milliseconds);
+
+VOID ucmSleep(
+    _In_ DWORD Miliseconds);
+
+BOOL ucmSetEnvironmentVariable(
+    _In_ LPCWSTR lpName,
+    _In_ LPCWSTR lpValue);
+
 #ifdef _DEBUG
 #define ucmDbgMsg(Message)  OutputDebugString(Message)
 #else
-#define ucmDbgMsg(Message)  
+#define ucmDbgMsg(Message) 
 #endif

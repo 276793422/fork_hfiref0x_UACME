@@ -1,12 +1,12 @@
 /*******************************************************************************
 *
-*  (C) COPYRIGHT AUTHORS, 2014 - 2020
+*  (C) COPYRIGHT AUTHORS, 2014 - 2023
 *
 *  TITLE:       GLOBAL.H
 *
-*  VERSION:     3.23
+*  VERSION:     3.65
 *
-*  DATE:        18 Dec 2019
+*  DATE:        22 Sep 2023
 *
 *  Common header file for the program support routines.
 *
@@ -33,30 +33,25 @@
 #pragma warning(disable: 6258) // Using TerminateThread does not allow proper thread clean up
 #pragma warning(disable: 6320) // exception-filter expression is the constant EXCEPTION_EXECUTE_HANDLER
 #pragma warning(disable: 6255 6263)  // alloca
+#pragma warning(disable: 28159)
 
 #define PAYLOAD_ID_NONE MAXDWORD
-#define KONGOU_IDR 0xFFFFFFFE
+
+#define SECRETS_ID IDR_SECRETS
 
 #ifdef _WIN64
 #include "bin64res.h"
 #define FUBUKI_ID IDR_FUBUKI64
-#define HIBIKI_ID IDR_HIBIKI64
-#define IKAZUCHI_ID IDR_IKAZUCHI64
 #define AKATSUKI_ID IDR_AKATSUKI64
+#define FUBUKI32_ID IDR_FUBUKI32
+#define FUBUKI64_ID IDR_FUBUKI64
 #define KAMIKAZE_ID IDR_KAMIKAZE
-#define FUJINAMI_ID IDR_FUJINAMI
-#define CHIYODA_ID IDR_CHIYODA
-#define KONGOU_ID KONGOU_IDR
 #else
 #include "bin32res.h"
 #define FUBUKI_ID IDR_FUBUKI32
-#define HIBIKI_ID IDR_HIBIKI32
-#define IKAZUCHI_ID IDR_IKAZUCHI32
 #define AKATSUKI_ID PAYLOAD_ID_NONE //this module unavailable for 32 bit
+#define FUBUKI32_ID IDR_FUBUKI32
 #define KAMIKAZE_ID IDR_KAMIKAZE
-#define FUJINAMI_ID IDR_FUJINAMI //this module is dotnet x86 for any supported platform
-#define CHIYODA_ID PAYLOAD_ID_NONE //this module unavailable for 32 bit
-#define KONGOU_ID KONGOU_IDR
 #endif
 
 #include <Windows.h>
@@ -64,7 +59,24 @@
 #include <CommCtrl.h>
 #include <shlobj.h>
 #include <AccCtrl.h>
-#include "shared\ntos.h"
+#include <wintrust.h>
+#include <taskschd.h>
+
+#define SECURITY_WIN32
+#include <Security.h>
+
+#pragma comment(lib, "taskschd.lib")
+#pragma comment(lib, "rpcrt4.lib")
+#pragma comment (lib, "Secur32.lib")
+
+#pragma warning(push)
+#pragma warning(disable: 4115) //named type definition in parentheses
+#include <fusion.h>
+#pragma warning(pop)
+
+#include "shared\hde\hde64.h"
+#include "shared\ntos\ntos.h"
+#include "shared\ntos\ntbuilds.h"
 #include "shared\minirtl.h"
 #include "shared\cmdline.h"
 #include "shared\_filename.h"
@@ -72,15 +84,13 @@
 #include "shared\windefend.h"
 #include "shared\consts.h"
 #include "sup.h"
+#include "fusutil.h"
 #include "compress.h"
 #include "aic.h"
+#include "stub.h"
+#include "console.h"
 #include "methods\methods.h"
 
-//
-// enable for test
-//#pragma comment(lib, "libucrt.lib")
-//#include <strsafe.h>
-//
 //default execution flow
 #define AKAGI_FLAG_KILO  1
 
@@ -94,26 +104,39 @@ typedef struct _UACME_SHARED_CONTEXT {
 } UACME_SHARED_CONTEXT, *PUACME_SHARED_CONTEXT;
 
 typedef struct _UACME_CONTEXT {
-    BOOL                    IsWow64;
-    BOOL                    OutputToDebugger;
+    BOOLEAN                 IsWow64;
     ULONG                   Cookie;
-    PVOID                   ucmHeap;
-    pfnDecompressPayload    DecompressRoutine;
-    HINSTANCE               hNtdll;
-    HINSTANCE               hKernel32;
-    HINSTANCE               hShell32;
-    HINSTANCE               hMpClient;
-    UACME_SHARED_CONTEXT    SharedContext;
-    UCM_METHOD_EXECUTE_TYPE MethodExecuteType;
     ULONG                   dwBuildNumber;
     ULONG                   AkagiFlag;
     ULONG                   IFileOperationFlags;
-    ULONG                   OptionalParameterLength; //count of characters
-    WCHAR                   szSystemRoot[MAX_PATH + 1]; //with end slash
-    WCHAR                   szSystemDirectory[MAX_PATH + 1];//with end slash
-    WCHAR                   szTempDirectory[MAX_PATH + 1]; //with end slash
-    WCHAR                   szOptionalParameter[MAX_PATH + 1]; //limited to MAX_PATH
-    WCHAR                   szDefaultPayload[MAX_PATH + 1]; //limited to MAX_PATH
+
+    // Count of characters
+    ULONG                   OptionalParameterLength; 
+
+    PVOID                   ucmHeap;
+    pfnDecompressPayload    DecompressRoutine;
+    pswprintf_s             swprintf_s;
+    
+    UACME_FUSION_CONTEXT    FusionContext;
+    UACME_SHARED_CONTEXT    SharedContext;
+
+    // Windows directory with end slash
+    WCHAR                   szSystemRoot[MAX_PATH + 1];
+
+    // Windows\System32 directory with end slash
+    WCHAR                   szSystemDirectory[MAX_PATH + 1];
+
+    // Current user temp directory with end slash
+    WCHAR                   szTempDirectory[MAX_PATH + 1];
+
+    // Current program directory with end slash
+    WCHAR                   szCurrentDirectory[MAX_PATH + 1];
+
+    // Optional parameter, limited to MAX_PATH
+    WCHAR                   szOptionalParameter[MAX_PATH + 1]; 
+
+    // Default payload (system32\cmd.exe), limited to MAX_PATH
+    WCHAR                   szDefaultPayload[MAX_PATH + 1]; 
 } UACMECONTEXT, *PUACMECONTEXT;
 
 typedef struct _UACME_PARAM_BLOCK {
@@ -127,19 +150,18 @@ typedef struct _UACME_PARAM_BLOCK {
 } UACME_PARAM_BLOCK, *PUACME_PARAM_BLOCK;
 
 typedef UINT(WINAPI *pfnEntryPoint)(
-    _In_opt_ UCM_METHOD Method,
+    _In_ UCM_METHOD Method,
     _In_reads_or_z_opt_(OptionalParameterLength) LPWSTR OptionalParameter,
-    _In_opt_ ULONG OptionalParameterLength,
-    _In_ BOOL OutputToDebugger
+    _In_ ULONG OptionalParameterLength
     );
 
 typedef struct _UACME_THREAD_CONTEXT {
     TEB_ACTIVE_FRAME Frame;
     pfnEntryPoint ucmMain;
-    NTSTATUS ReturnedResult;
+    DWORD ReturnedResult;
     ULONG OptionalParameterLength;
     LPWSTR OptionalParameter;
-} UACME_THREAD_CONTEXT, *PUACME_THREAD_CONTEXT;
+} UACME_THREAD_CONTEXT, * PUACME_THREAD_CONTEXT;
 
 extern PUACMECONTEXT g_ctx;
 extern HINSTANCE g_hInstance;

@@ -1,14 +1,14 @@
 /*******************************************************************************
 *
-*  (C) COPYRIGHT AUTHORS, 2017 - 2019
+*  (C) COPYRIGHT AUTHORS, 2017 - 2021
 *
 *  TITLE:       COMSUP.C
 *
-*  VERSION:     3.17
+*  VERSION:     3.57
 *
-*  DATE:        16 Mar 2019
+*  DATE:        01 Nov 2021
 *
-*  IFileOperation based routines.
+*  COM interfaces based routines.
 *
 * THIS CODE AND INFORMATION IS PROVIDED "AS IS" WITHOUT WARRANTY OF
 * ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED
@@ -27,13 +27,12 @@
 *
 */
 HRESULT ucmAllocateElevatedObject(
-    _In_ LPWSTR lpObjectCLSID,
+    _In_ LPCWSTR lpObjectCLSID,
     _In_ REFIID riid,
     _In_ DWORD dwClassContext,
     _Outptr_ void **ppv
 )
 {
-    BOOL        bCond = FALSE;
     DWORD       classContext;
     HRESULT     hr = E_FAIL;
     PVOID       ElevatedObject = NULL;
@@ -83,7 +82,7 @@ HRESULT ucmAllocateElevatedObject(
 
         hr = CoGetObject(szMoniker, (BIND_OPTS *)&bop, riid, &ElevatedObject);
 
-    } while (bCond);
+    } while (FALSE);
 
     *ppv = ElevatedObject;
 
@@ -127,11 +126,11 @@ VOID ucmxFileOpCreateAndRelease(VOID)
 *
 */
 BOOL ucmMasqueradedRenameElementCOM(
-    _In_ LPWSTR OldName,
-    _In_ LPWSTR NewName
+    _In_ LPCWSTR OldName,
+    _In_ LPCWSTR NewName
 )
 {
-    BOOL                bCond = FALSE, bResult = FALSE;
+    BOOL                bResult = FALSE;
     IFileOperation     *FileOperation = NULL;
     IShellItem         *psiDestDir = NULL;
     HRESULT             hr_init;
@@ -191,7 +190,7 @@ BOOL ucmMasqueradedRenameElementCOM(
 
         bResult = TRUE;
 
-    } while (bCond);
+    } while (FALSE);
 
     if (FileOperation != NULL) {
         FileOperation->lpVtbl->Release(FileOperation);
@@ -217,11 +216,11 @@ BOOL ucmMasqueradedRenameElementCOM(
 *
 */
 BOOL ucmMasqueradedCreateSubDirectoryCOM(
-    _In_ LPWSTR ParentDirectory,
-    _In_ LPWSTR SubDirectory
+    _In_ LPCWSTR ParentDirectory,
+    _In_ LPCWSTR SubDirectory
 )
 {
-    BOOL                bCond = FALSE, bResult = FALSE;
+    BOOL                bResult = FALSE;
     IFileOperation     *FileOperation = NULL;
     IShellItem         *psiDestDir = NULL;
     HRESULT             hr_init;
@@ -283,7 +282,7 @@ BOOL ucmMasqueradedCreateSubDirectoryCOM(
 
         bResult = TRUE;
 
-    } while (bCond);
+    } while (FALSE);
 
     if (FileOperation != NULL) {
         FileOperation->lpVtbl->Release(FileOperation);
@@ -309,12 +308,12 @@ BOOL ucmMasqueradedCreateSubDirectoryCOM(
 *
 */
 BOOL ucmMasqueradedMoveCopyFileCOM(
-    _In_ LPWSTR SourceFileName,
-    _In_ LPWSTR DestinationDir,
+    _In_ LPCWSTR SourceFileName,
+    _In_ LPCWSTR DestinationDir,
     _In_ BOOL fMove
 )
 {
-    BOOL                cond = FALSE, bResult = FALSE;
+    BOOL                bResult = FALSE;
     IFileOperation     *FileOperation = NULL;
     IShellItem         *isrc = NULL, *idst = NULL;
     HRESULT             r = E_FAIL, hr_init;
@@ -396,7 +395,7 @@ BOOL ucmMasqueradedMoveCopyFileCOM(
 
         bResult = TRUE;
 
-    } while (cond);
+    } while (FALSE);
 
     if (FileOperation != NULL)
         FileOperation->lpVtbl->Release(FileOperation);
@@ -423,10 +422,10 @@ BOOL ucmMasqueradedMoveCopyFileCOM(
 *
 */
 BOOL ucmMasqueradedDeleteDirectoryFileCOM(
-    _In_ LPWSTR FileName
+    _In_ LPCWSTR FileName
 )
 {
-    BOOL                cond = FALSE, bResult = FALSE;
+    BOOL                bResult = FALSE;
     IFileOperation     *FileOperation = NULL;
     IShellItem         *isrc = NULL;
     HRESULT             r = E_FAIL, hr_init;
@@ -485,7 +484,7 @@ BOOL ucmMasqueradedDeleteDirectoryFileCOM(
 
         bResult = TRUE;
 
-    } while (cond);
+    } while (FALSE);
 
     if (FileOperation != NULL)
         FileOperation->lpVtbl->Release(FileOperation);
@@ -519,12 +518,127 @@ BOOL ucmMasqueradedDeleteDirectoryFileCOM(
 *
 */
 BOOL ucmMasqueradedMoveFileCOM(
-    _In_ LPWSTR SourceFileName,
-    _In_ LPWSTR DestinationDir
+    _In_ LPCWSTR SourceFileName,
+    _In_ LPCWSTR DestinationDir
 )
 {
     return ucmMasqueradedMoveCopyFileCOM(
         SourceFileName,
         DestinationDir,
         TRUE);
+}
+
+/*
+* ucmMasqueradedGetObjectSecurityCOM
+*
+* Purpose:
+*
+* Get object security through ISecurityEditor(GetNamedInfo).
+* This function expects that supMasqueradeProcess was called on process initialization.
+* 
+* Note:
+* Use CoTaskMemFree to release Sddl allocated memory as SecurityEditor->GetSecurity uses SHStrDupW to store result SSDL.
+*
+*/
+BOOL ucmMasqueradedGetObjectSecurityCOM(
+    _In_ LPCWSTR lpTargetObject,
+    _In_ SECURITY_INFORMATION SecurityInformation,
+    _In_ SE_OBJECT_TYPE ObjectType,
+    _Inout_ LPOLESTR *Sddl
+)
+{
+    HRESULT          r = E_FAIL, hr_init;
+    ISecurityEditor* SecurityEditor = NULL;
+
+    hr_init = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+
+    do {
+
+        r = ucmAllocateElevatedObject(
+            T_CLSID_ShellSecurityEditor,
+            &IID_ISecurityEditor,
+            CLSCTX_LOCAL_SERVER,
+            &SecurityEditor);
+
+        if (r != S_OK)
+            break;
+
+        if (SecurityEditor == NULL) {
+            r = E_OUTOFMEMORY;
+            break;
+        }
+
+        r = SecurityEditor->lpVtbl->GetSecurity(
+            SecurityEditor,
+            lpTargetObject,
+            ObjectType,
+            SecurityInformation,
+            Sddl);
+
+    } while (FALSE);
+
+    if (SecurityEditor != NULL) {
+        SecurityEditor->lpVtbl->Release(SecurityEditor);
+    }
+
+    if (hr_init == S_OK)
+        CoUninitialize();
+
+    return SUCCEEDED(r);
+}
+
+/*
+* ucmMasqueradedSetObjectSecurityCOM
+*
+* Purpose:
+*
+* Change object security through ISecurityEditor(SetNamedInfo).
+* This function expects that supMasqueradeProcess was called on process initialization.
+*
+*/
+BOOL ucmMasqueradedSetObjectSecurityCOM(
+    _In_ LPCWSTR lpTargetObject,
+    _In_ SECURITY_INFORMATION SecurityInformation,
+    _In_ SE_OBJECT_TYPE ObjectType,
+    _In_ LPCWSTR NewSddl
+)
+{
+    HRESULT          r = E_FAIL, hr_init;
+    ISecurityEditor* SecurityEditor = NULL;
+
+    hr_init = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+
+    do {
+
+        r = ucmAllocateElevatedObject(
+            T_CLSID_ShellSecurityEditor,
+            &IID_ISecurityEditor,
+            CLSCTX_LOCAL_SERVER,
+            &SecurityEditor);
+
+        if (r != S_OK)
+            break;
+
+        if (SecurityEditor == NULL) {
+            r = E_OUTOFMEMORY;
+            break;
+        }
+
+        r = SecurityEditor->lpVtbl->SetSecurity(
+            SecurityEditor,
+            lpTargetObject,
+            ObjectType,
+            SecurityInformation,
+            NewSddl);
+
+    } while (FALSE);
+
+    if (SecurityEditor != NULL) {
+        SecurityEditor->lpVtbl->Release(SecurityEditor);
+    }
+
+    if (hr_init == S_OK)
+        CoUninitialize();
+
+    return SUCCEEDED(r);
 }
